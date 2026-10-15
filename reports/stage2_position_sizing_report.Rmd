@@ -1,0 +1,156 @@
+---
+title: "Pricing vs sizing, Stage 2: position sizing in a fat-tailed world"
+author: "Nicolas Athinodorou"
+date: "October 2026"
+output:
+  pdf_document:
+    number_sections: true
+    fig_caption: true
+geometry: margin=2.4cm
+fontsize: 11pt
+header-includes:
+  - \usepackage{float}
+  - \usepackage{booktabs}
+  - \floatplacement{figure}{H}
+  - \floatplacement{table}{H}
+---
+
+```{r setup, include = FALSE}
+# Knit from the repository root after running code/stage2_position_sizing.R:
+#   rmarkdown::render("reports/stage2_position_sizing_report.Rmd", knit_root_dir = getwd())
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE, fig.align = "center")
+r  <- readRDS("results/stage2_results.rds")
+f  <- function(x, d = 1) formatC(x, format = "f", digits = d)
+pc <- function(x, d = 1) formatC(100 * x, format = "f", digits = d)
+kab <- function(x, cap, digits = 1, ...) knitr::kable(x, format = "latex", booktabs = TRUE,
+                                                     caption = cap, digits = digits, linesep = "", ...)
+Lk <- r$L_kelly; th <- r$tab_hist; ty <- r$tab_year; tw <- r$tab_week; r4 <- r$res4; p5 <- r$part5
+hv <- r$half_vs_full; mt <- r$margin_tab
+```
+
+# Aim {-}
+
+Stage 1 showed that the risk of a FTSE 100 / S&P 500 portfolio can be measured reliably one week ahead. Stage 2 asks the question that measurement does not answer: **how much should an investor bet?** The Stage 1 model is used as a simulated world in which nothing is mispriced. Investors differ only in the size of their position, so any difference in their outcomes is caused by sizing alone. The code is in `code/stage2_position_sizing.R`, and every number below is read from its output.
+
+# The simulated world
+
+The world is the Stage 1 model: AR(0)-GARCH(1,1) marginals with skewed Student-t shocks, joined by the survival BB1 copula and estimated on weekly returns from 2000 to 2025. It produces 10,000 possible futures of the equally weighted portfolio. Inside each path the volatility evolves through GARCH, so calm and volatile spells form. Paths for the year ahead start from the real market state at the end of 2025, and in their first week they reproduce the Stage 1 conditional VaR (`r pc(r$week1_var[2], 2)`% at 99%). Paths for the long run first run for 100 weeks, so that they forget this calm starting point.
+
+**The average return.** The world needs an average weekly return for each index. Two standard estimates from the same data differ by a factor of two or more (Table 1): the simple average of the weekly log returns, and the mean estimated as part of the GARCH model. The simple average reproduces what actually happened: £100 put into the S&P 500 at the start of 2000 grew to about £`r format(round(100 * r$growth_fold[1], -1), big.mark = ",")` by the end of 2025 (excluding dividends), whereas the GARCH mean implies it would have grown to about £`r format(round(100 * r$growth_fold[2], -2), big.mark = ",")`. GARCH estimation gives volatile weeks less weight, and these are the weeks in which most large losses occurred, so its mean comes out too high. The world therefore uses the simple averages.
+
+```{r mutab}
+m <- rbind("GARCH estimate" = r$mu_garch, "Simple average" = r$mu_sample)
+colnames(m) <- c("FTSE 100", "S\\&P 500")
+kab(m, "Average weekly log return: two estimates from the same 2000--2025 data.", 5, escape = FALSE)
+```
+
+**Dividends and borrowing costs** are both left out. Dividends add to the return and borrowing costs subtract from it, so what matters is their difference, the *net carry*. The result is sensitive to it. A net carry of +1% a year would raise the Kelly leverage of Section 2 from `r f(Lk, 2)` to `r f(r$L_carry[3], 2)`, and -1% would lower it to `r f(r$L_carry[1], 2)`. Since individual investors usually borrow above the short-term interest rate, the second case is the more realistic one, which would make the dangers of overbetting shown below larger, not smaller.
+
+**How realistic is the world?** It is reliable for one-week risk, which is what Stage 1 validated by backtesting. It understates how far losses build up over several months. A fall of more than 20% from a peak within a year occurs in `r pc(mean(r$dd_burn > 0.2))`% of simulated years (`r pc(mean(r$sim_dd > 0.2))`% when starting from the calm end-2025 market), against `r r$k_cal` of `r r$n_cal` real calendar years (`r pc(r$k_cal / r$n_cal)`%). The real figure rests on only 26 years, so it is imprecise: its exact 95% confidence interval runs from `r pc(r$ci_cal[1])`% to `r pc(r$ci_cal[2])`%, and the model's value lies inside it. Other evidence points the same way, though. The model produces a week as bad as October 2008 (-19.6%) about once every `r f(r$bad_week_freq[2], 0)` years, while the real data contain one in 26 years. The reason is that the model makes the *size* of weekly moves cluster but draws each week's *direction* independently, so it rarely produces the long runs of losing weeks seen in real bear markets. **All probabilities of large losses below are therefore best read as lower bounds.**
+
+# The Kelly leverage
+
+An investor with leverage $L$ holds $L$ times their own money in the portfolio, borrowing the rest, and rebalances every week, so their wealth is multiplied by $1 + L R_t$ in week $t$. The Kelly criterion (Kelly, 1956) chooses $L$ to maximise the long-run growth rate of wealth, $E[\ln(1 + L R)]$. Because weekly returns are small, this growth rate is very close to a simpler expression (a second-order Taylor approximation of the logarithm):
+$$ \text{growth} \approx L\,m - \tfrac12 L^2 \sigma^2 , $$
+where $m$ is the average weekly return and $\sigma^2$ its variance. The first term is what the edge earns, and it rises in proportion to the bet. The second term is the damage done by volatility, and it rises with the *square* of the bet: a 50% loss needs a 100% gain to recover, and the bigger the bet, the bigger the swings. Doubling the bet doubles the gain but quadruples the damage. Growth is therefore highest where the two balance, which happens at (Thorp, 2006)
+$$ L^* = \frac{\text{average weekly return}}{\text{variance of weekly returns}} = `r f(Lk, 2)`. $$
+For every £100 of their own money, Kelly says hold £`r round(100 * Lk)` of the portfolio.
+
+Figure 1 checks this on the simulated paths. It shows the typical (median) growth rate of wealth for each leverage. Growth rises with leverage, is almost flat between about 2 and 3 (its highest point on the grid is at `r f(r$L_grid[which.max(r$g_grid)], 1)`), and then falls steeply. Kelly's `r f(Lk, 2)` sits in the flat region. Betting more than this adds a lot of risk for little or no extra growth, and at about twice Kelly, growth is lower than with no leverage at all.
+
+```{r growthfig, out.width = "78%", fig.cap = "Typical (median) long-run growth of wealth against leverage in the simulated world."}
+knitr::include_graphics(normalizePath("figures/growth_vs_leverage.png"), rel_path = FALSE)
+```
+
+One technical caveat matters. The model's shocks are unbounded, so for any $L > 1$ there is a tiny chance of a week that loses more than $1/L$ of the portfolio, which would wipe the investor out. At $L = `r f(Lk, 2)`$ this happens about once every `r format(round(1 / (r$p_wipe_week * 52), -2), big.mark = ",")` years in the model. Because $\ln 0 = -\infty$, the exact expected log growth is $-\infty$ for every $L > 1$. The approximation above ignores this extremely rare event, as is standard in practice.
+
+The Kelly leverage depends directly on the estimated average return. An investor who used the GARCH means from Table 1 would compute $L = `r f(r$L_garch, 2)`$, about `r f(r$L_garch / Lk, 1)` times the true Kelly leverage, from the same data. Section 4 studies this problem systematically.
+
+# Investors who know the odds
+
+Four investors are compared, holding £100 (no leverage), £`r round(50 * Lk)` (half Kelly), £`r round(100 * Lk)` (full Kelly) and £`r round(200 * Lk)` (twice Kelly) for every £100 of their own money. They *know the odds*: they know the true probability distribution of next week's return in this world, in particular its true average and variance, so they can compute the true Kelly leverage. They do not know what any particular week will bring, just as knowing that a die is fair does not tell you the next roll. No real investor has this knowledge, since the average must be estimated from past data. These investors are the theoretical best case, and Section 4 removes this assumption.
+
+## One-week risk (simulated)
+
+```{r weektab}
+w <- tw[, 1:4]
+colnames(w) <- c("VaR 99\\% (\\%)", "ES 99\\% (\\%)", "25\\%+ week: every (yrs)", "50\\%+ week: every (yrs)")
+kab(w, "Loss of the investor's own money in one week, simulated long run.", 1, escape = FALSE)
+```
+
+The weekly risk to the investor's money is proportional to the position. At full Kelly, a quarter of it can disappear in a single week about once every `r f(tw["Full Kelly", 3], 0)` years. At twice Kelly, it happens about every `r f(tw["2x Kelly", 3], 1)` years.
+
+## Replaying the real weeks of 2000--2025
+
+```{r histtab}
+h <- th; h[, 3] <- -h[, 3]
+colnames(h) <- c("Worst wk (\\%)", "Covid (\\%)", "Max DD (\\%)", "\\pounds 1 became", "Growth/yr (\\%)")
+kab(h, "Each investor over the real weekly returns of 2000--2025. Covid crash = the four weeks from 24 February to 20 March 2020. Drawdowns are measured from the previous peak. The last two columns show what £1 invested in January 2000 had become by the end of 2025.", 2, escape = FALSE)
+```
+
+These replays use hindsight. The Kelly leverage was computed from a world calibrated on these same 26 years, so no investor in 2000 could have known it. Even so, full Kelly fell `r f(th["Full Kelly", 3], 0)`% from its peak along the way and lost `r f(-th["Full Kelly", 2], 0)`% in the four weeks of the Covid crash. Twice Kelly lost `r f(-th["2x Kelly", 1], 0)`% in a single week in October 2008, and after 26 years £1 had become £`r f(th["2x Kelly", 4], 2)`.
+
+These replays assume every investor held on to the end. Because the positions are rebalanced weekly, leverage is cut after every loss, so even full Kelly never faced a margin call. With a 25% maintenance margin, a call would need a single-week fall of `r f(mt["Full Kelly, true", 2], 0)`%, and the worst real week was -19.6%. In practice, though, a fund that falls 87% is normally closed by its investors or its risk limits long before it can recover, so full Kelly's final £`r f(th["Full Kelly", 4], 2)` (against £`r f(th["Half Kelly", 4], 2)` for half Kelly) is unlikely to be reached. Half Kelly's `r f(th["Half Kelly", 3], 0)`% fall is far more survivable.
+
+These are two of the most stable, diversified equity indices, and full Kelly still fell `r f(th["Full Kelly", 3], 0)`%. For a more volatile asset the Kelly leverage itself would be lower, but its average return would be even harder to estimate, so the danger of overbetting would be greater.
+
+## The year ahead (simulated from end-2025, a lower bound)
+
+```{r yeartab}
+y <- ty; colnames(y) <- c("P(fall of 50\\%+) (\\%)", "P(fall of 25\\%+) (\\%)", "Median return (\\%)")
+kab(y, "Outcomes over the next year, simulated from the end-2025 market.", 1, escape = FALSE)
+```
+
+Over a single year, twice Kelly has the highest median return, but a `r f(ty["2x Kelly", 1], 0)`% chance of losing half its money. Most of the time overbetting looks successful. Its cost is rare and arrives all at once, which is why it is tempting.
+
+## Half Kelly versus full Kelly
+
+Half Kelly keeps `r f(hv[1, 3], 0)`% of full Kelly's long-run growth in the simulated world (`r f(hv[2, 3], 0)`% in the real data). It does so with half the weekly risk (Table 2) and about a twentieth of the chance of losing half its money within a year (Table 4). For comparison, the second-order approximation above predicts that half Kelly keeps 75% of the growth. Full Kelly grows fastest only if the odds are known exactly and its drawdowns can be survived.
+
+# Investors who estimate the odds
+
+Real investors do not know the true average return. They estimate it from past data. Here the true average is the portfolio's average weekly return in the simulated world, `r formatC(r$m_true, format = "f", digits = 5)`, which matches the real portfolio's average over 2000--2025 (`r formatC(r$real_mean, format = "f", digits = 5)`). With `r format(r$n_weeks, big.mark = ",")` weekly observations, the standard error of that average is `r formatC(r$se_mean, format = "f", digits = 5)`, `r pc(r$se_mean / r$m_true, 0)`% of the average itself. The t-statistic is only `r f(r$real_mean / r$se_mean, 2)`, so the 95% confidence interval for the average weekly return, from `r formatC(r$real_mean - 1.96 * r$se_mean, format = "f", digits = 5)` to `r formatC(r$real_mean + 1.96 * r$se_mean, format = "f", digits = 5)`, **includes zero**. Twenty-six years of data cannot rule out that the true average return is zero, or that it is twice the estimate. The variance is treated as known, because it is estimated far more precisely than the average: its standard error is only `r pc(r$rel_se_var, 0)`% of its value, against `r pc(r$rel_se_mean, 0)`% for the average.
+
+## Two particular errors
+
+Each Kelly investor is first given two guesses, one standard error above and one below the true average. About one investor in six would guess too high by at least this much, and one in six too low.
+
+```{r p4tab}
+t5 <- r4[, c(1, 2, 3, 5, 6, 7)]
+rownames(t5) <- sub("overestimate", "over", sub("underestimate", "under", sub("true odds", "true", rownames(t5))))
+colnames(t5) <- c("Position", "Growth (\\%)", "VaR 99\\% (\\%)", "P50 (\\%)", "Max DD (\\%)", "\\pounds 1 became")
+kab(t5, "Kelly investors using an overestimated (over), the true and an underestimated (under) average return. Position per £100 of own money. Growth per year, simulated. P50 = chance of a fall of 50\\%+ within the next year, simulated. The last two columns replay the real weeks of 2000--2025.", c(0, 1, 1, 1, 1, 2), escape = FALSE)
+```
+
+**Overestimating is far more dangerous than underestimating.** Both errors reduce long-run growth, but their effect on risk is very asymmetric. The full Kelly investor who overestimates holds £`r round(r4[2, 1])` instead of £`r round(r4[3, 1])`. Their growth falls from `r f(r4[3, 2])`% to `r f(r4[2, 2])`% a year, while their chance of losing half their money within a year rises from `r f(r4[3, 5])`% to `r f(r4[2, 5])`%. In the real data this investor fell `r f(-r4[2, 6], 0)`% from the peak, and £1 became only £`r f(r4[2, 7], 2)`. Their own money is only `r f(100 / r4[2, 1] * 100, 0)`% of the position, so with a 25% maintenance margin a weekly fall of just `r f(mt["Full Kelly, over", 2], 1)`% triggers a margin call. That happened in `r mt["Full Kelly, over", 3]` of the `r format(r$n_weeks, big.mark = ",")` real weeks, so the replay's assumption that this investor could hold on is unrealistic. The investor who underestimates grows more slowly (`r f(r4[4, 2])`% a year), but with less risk than holding the portfolio unleveraged.
+
+**Half Kelly is a margin of safety, not a guarantee.** The half Kelly investor who overestimates by the same amount holds £`r round(r4[5, 1])`, still below the true Kelly position. It would take a weekly fall of `r f(mt["Half Kelly, over", 2], 0)`% to trigger a margin call. Their chance of losing half their money within a year is `r f(r4[5, 5])`%, less than half that of full Kelly with the correct odds. But in the real data they still fell `r f(-r4[5, 6], 0)`% from the peak. Halving the bet limits the damage from an overestimate. It does not remove it.
+
+## Averaged over all possible errors
+
+The two guesses above are particular cases. A real investor does not know whether their own estimate is too high or too low, so the useful question is which *rule* works best on average. To answer it, 4,000 investors each look at a different possible history and so obtain a different estimate $\hat m$ of the average return, drawn from its sampling distribution: a normal distribution centred on the true average $m$, with the standard error $s$ above. Each investor then computes **their own** Kelly leverage from their own estimate, $\hat m/\sigma^2$, and bets a fixed fraction $c$ of it, for example half. Since the estimates differ, the bets differ: an investor who overestimated bets more than one who underestimated, exactly as would happen in reality. What is compared is therefore the rule ("estimate the average, then bet a fraction $c$ of the Kelly leverage it implies"), averaged over all the estimates an investor could have ended up with. An investor whose estimate is negative (`r pc(r$share_negative, 0)`% of them) takes no position.
+
+```{r p5tab}
+q <- p5[, -1]; rownames(q) <- c("1/4 Kelly", "1/2 Kelly", "3/4 Kelly", "Full Kelly")
+colnames(q) <- c("Avg. growth (\\%/yr)", "Avg. P50 (\\%)", "Over 2x Kelly (\\%)", "P50 over 10\\% (\\%)")
+kab(q, "Outcomes averaged over 4,000 investors' estimation errors. P50 = chance of a fall of 50\\%+ within the next year, simulated. The last two columns give the share of investors whose leverage exceeds twice the true Kelly leverage, and whose P50 exceeds 10\\%.", 2, escape = FALSE)
+```
+
+Once estimation error is included, **full Kelly no longer maximises growth**. Three-quarter Kelly grows faster on average (`r f(p5[3, 2], 2)`% against `r f(p5[4, 2], 2)`%) with less than half the average chance of halving (`r f(p5[3, 3])`% against `r f(p5[4, 3])`%). The growth formula above explains why. An investor using fraction $c$ bets $L = c\,\hat m/\sigma^2$. Averaged over all investors, the *gain* term $L\,m$ is the same as if everyone had guessed exactly right, because the overestimates and underestimates cancel out. The *damage* term $\tfrac12 L^2\sigma^2$ does not cancel: it grows with the square of the bet, so an overbet costs more than an equal underbet saves. Estimation error therefore adds damage without adding gain, and the noisier the estimate, the more it pays to bet less. Working this through gives an average growth of $\big(c\,m^2 - \tfrac12 c^2 (m^2 + s^2)\big)/\sigma^2$, where the extra $s^2$ is the damage caused by the noise. This is highest at
+$$ c^* = \frac{m^2}{m^2 + s^2} = \frac{1}{1 + (s/m)^2} = `r f(r$c_star, 2)`, $$
+close to, but a little below, the simulation. On a fine grid of fractions the simulation puts the best fraction at about `r f(r$c_grid[which.max(r$g_c)], 2)`, with average growth almost flat between 0.75 and 0.95 (within `r f(max(r$g_c) - r$g_c[abs(r$c_grid - 0.75) < 1e-9], 2)` percentage points of the maximum). The difference has two sources. The simulation measures typical (median) growth, whose peak lies at a slightly higher leverage than the formula's (Section 2), and investors with a negative estimate take no position instead of betting against the market. Both push the best fraction up. Half Kelly gives up some of this growth (`r f(p5[2, 2], 2)`% a year) in exchange for a much smaller average chance of halving (`r f(p5[2, 3])`%), and almost no investor using it faces a high chance of halving. The exact best fraction depends on how much growth one is willing to trade for safety, and on $s/m$, which is itself only estimated. The direction does not: **when the edge is estimated from noisy data, the right bet is a fraction of Kelly.**
+
+# Conclusions
+
+* **Sizing alone decides survival.** In a world where nothing is mispriced, the same portfolio produces anything from steady growth to near-total loss, depending only on the size of the position.
+* **More leverage is not more growth.** Beyond about the Kelly leverage, extra leverage adds a lot of risk for little or no extra growth, and well beyond it growth falls.
+* **Kelly is only as good as the estimate of the odds.** Twenty-six years of weekly data cannot even rule out a zero average return. Overestimating it turns full Kelly into dangerous overbetting, while underestimating it mainly costs growth.
+* **A fraction of Kelly is the robust choice.** Averaged over estimation error, a fraction of roughly three-quarters to nine-tenths of Kelly maximises growth, and half Kelly gives up some growth for much more safety. Neither is safe in an absolute sense: half Kelly with an overestimated edge still fell `r f(-r4[5, 6], 0)`% in the real data.
+* **These are lower bounds on the risk,** because the simulated world understates losses that build up over several months, and because borrowing costs above the risk-free rate would lower the Kelly leverage further.
+
+# References {-}
+
+Kelly, J. L. (1956). A new interpretation of information rate. *Bell System Technical Journal*, 35(4), 917--926.
+
+Thorp, E. O. (2006). The Kelly criterion in blackjack, sports betting and the stock market. In S. A. Zenios and W. T. Ziemba (eds.), *Handbook of Asset and Liability Management*, Vol. 1, 385--428. Elsevier.
+

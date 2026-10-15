@@ -1,0 +1,221 @@
+---
+title: "Pricing vs sizing, Stage 1: risk measurement"
+subtitle: "One-week Value-at-Risk and Expected Shortfall of a FTSE 100 / S&P 500 portfolio"
+author: "Nicolas Athinodorou"
+date: "October 2026"
+output:
+  pdf_document:
+    number_sections: true
+    toc: false
+    fig_caption: true
+geometry: margin=2.4cm
+fontsize: 11pt
+header-includes:
+  - \usepackage{float}
+  - \usepackage{booktabs}
+  - \floatplacement{figure}{H}
+  - \floatplacement{table}{H}
+---
+
+```{r setup, include = FALSE}
+# Knit from the repository root after running code/stage1_analysis.R:
+#   rmarkdown::render("reports/stage1_risk_measurement_report.Rmd", knit_root_dir = getwd())
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE, fig.align = "center")
+suppressPackageStartupMessages(library(fGarch))
+res <- readRDS("results/stage1_results.rds")
+pc  <- function(x, d = 2) formatC(100 * x, format = "f", digits = d)   # 0.0400 -> "4.00"
+f   <- function(x, d = 3) formatC(x, format = "f", digits = d)
+kab <- function(x, cap, digits = 3, ...) knitr::kable(x, format = "latex", booktabs = TRUE,
+                                                     caption = cap, digits = digits, linesep = "", ...)
+ft <- res$final_tab; cb <- res$cop_best; ct <- res$cop_tab; bt <- res$bt_tab
+rm_ <- res$res_main; tt <- res$tail_tab
+cs <- res$cop_switch; starts <- res$bt$Date[cumsum(cs$lengths) - cs$lengths + 1]
+```
+
+# Acknowledgement {-}
+
+Stage 1 began as group coursework for STAT0011 Decision and Risk at UCL (Group 13, March 2026). The data collection, the AR-GARCH and copula model selection and the unconditional VaR are the group's work. I revised and extended it in October 2026, adding the conditional VaR, Expected Shortfall, the copula comparison and tail checks, the backtest and the 2026 out-of-sample check. Every number in this report is read directly from the output of `code/stage1_analysis.R`.
+
+# Question
+
+How much can an equally weighted portfolio of the FTSE 100 and the S&P 500 lose in one week, and can that estimate be trusted? This stage estimates the one-week 95% and 99% Value-at-Risk (VaR) and Expected Shortfall (ES), both for a typical week and for the week after the end of the sample. It then checks the forecasts against 21 years of real weeks and against 2026, which the model had not seen.
+
+# Data
+
+Weekly prices from January 2000 to December 2025 were downloaded from Yahoo Finance with the `quantmod` package. Missing and duplicate rows are removed, and weekly log returns are computed as $r_t = \ln P_t - \ln P_{t-1}$. Yahoo dates each weekly bar on the Friday or Saturday *before* its trading week, and some FTSE 100 weeks carry a Friday date while the matching S&P 500 week carries a Saturday date. The two series are therefore matched by ISO calendar week rather than by row position. This gives `r res$n_weeks` weekly returns for each index (bars dated `r format(res$first_date)` to `r format(res$last_date)`). Returns are price returns and exclude dividends.
+
+```{r returns, fig.cap = "Weekly log returns. Volatility clusters, with bursts in 2002, 2008 and 2020.", fig.height = 3.3}
+op <- par(mfrow = c(2, 1), mar = c(2.5, 4.5, 1.8, 1))
+plot(res$dates, res$ret_ftse, type = "l", main = "FTSE 100", xlab = "", ylab = "Log return")
+plot(res$dates, res$ret_snp,  type = "l", main = "S&P 500",  xlab = "", ylab = "Log return")
+par(op)
+```
+
+# Marginal models
+
+Each index is modelled as an AR($p$)-GARCH(1,1) process:
+$$ r_t = \mu + \sum_{i=1}^{p}\phi_i r_{t-i} + u_t,\qquad u_t = \sigma_t \varepsilon_t,\qquad \sigma_t^2 = \omega + \alpha u_{t-1}^2 + \beta \sigma_{t-1}^2 , $$
+where the shocks $\varepsilon_t$ are independent with mean 0 and variance 1. The GARCH equation makes today's volatility depend on yesterday's shock and volatility, so calm and turbulent periods cluster, as Figure 1 shows.
+
+## Mean equation: how many AR lags?
+
+Table 1 compares $p = 0, \dots, 5$ using information criteria and diagnostic tests on the standardised residuals $z_t = \hat u_t / \hat\sigma_t$. LB $z$ (10) and LB $z$ (20) are Ljung-Box tests for remaining autocorrelation in the mean, with degrees of freedom adjusted for the $p$ AR coefficients. LB $z^2$ and ARCH-LM test for remaining volatility clustering. All entries except AIC and BIC are p-values.
+
+```{r artab}
+tab <- rbind(res$tab_ar_ftse, res$tab_ar_snp)
+rownames(tab) <- c(paste("FTSE", rownames(res$tab_ar_ftse)), paste("S\\&P", rownames(res$tab_ar_snp)))
+colnames(tab) <- c("AIC", "BIC", "LB z (10)", "LB z (20)", "LB z$^2$ (10)", "LB z$^2$ (20)", "ARCH-LM")
+kab(tab, "AR($p$)-GARCH(1,1) models with skewed Student-t shocks: information criteria (per observation) and diagnostic p-values.", 4, escape = FALSE)
+```
+
+The information criteria and the residual tests point in different directions. BIC is lowest for AR(4) for the FTSE 100 and AR(3) for the S&P 500, because raw weekly returns do show small negative autocorrelations (the largest is about $-0.1$ at lag 3 for the FTSE 100). Yet adding AR terms makes the Ljung-Box tests on the standardised residuals *worse*. This is because most of the autocorrelation comes from turbulent periods, which the GARCH model already scales down by their high volatility. A coefficient estimated on all the data therefore over-corrects the calm periods. AR(0) is the only model whose residuals pass the Ljung-Box test at lag 10 for both indices. For the FTSE 100 it fails narrowly at lag 20 (p = `r f(res$tab_ar_ftse["AR(0)", "LB_z_20"], 3)`), because of a few small autocorrelations at scattered lags. Every other AR order fails at lag 20 as well, and by a much wider margin, so AR(0) is the best available choice.
+
+AR(0) was therefore chosen for its residual behaviour and simplicity, against the preference of BIC. Section 5.3 shows that the choice does not matter for the result: with the BIC-preferred AR orders, next week's 99% VaR changes by about 0.1 percentage points.
+
+## Shock distribution
+
+```{r disttab}
+d <- cbind(res$dist_ic[["FTSE 100"]], res$dist_ic[["S&P 500"]])
+colnames(d) <- c("FTSE AIC", "FTSE BIC", "S\\&P AIC", "S\\&P BIC")
+kab(d, "AR(0)-GARCH(1,1) with different shock distributions (lower is better).", 4, escape = FALSE)
+```
+
+The skewed Student-t distribution has the lowest AIC and BIC for both indices (Table 2). This distribution allows fat tails (through the shape parameter $\nu$) and asymmetry (through the skew parameter $\xi$, with $\xi < 1$ meaning large falls are more common than equally large rises).
+
+```{r coeftab}
+co <- t(ft[, c("mu", "omega", "alpha1", "beta1", "skew", "shape", "persistence", "half_life_wks", "long_run_vol")])
+rownames(co) <- c("$\\mu$", "$\\omega$", "$\\alpha$", "$\\beta$", "skew $\\xi$", "shape $\\nu$",
+                  "$\\alpha+\\beta$", "half-life (weeks)", "long-run weekly vol")
+colnames(co) <- c("FTSE 100", "S\\&P 500")
+co_f <- apply(co, 2, function(x) formatC(x, format = "g", digits = 4))
+kab(co_f, "Final AR(0)-GARCH(1,1) skewed Student-t models.", escape = FALSE)
+```
+
+Both indices have high persistence ($\alpha + \beta \approx 0.95$), so a volatility shock takes about 15 weeks to halve. Both have $\xi \approx 0.82$ (crashes are larger than rallies) and fat tails ($\nu$ between 6 and 8).
+
+## Do the fitted distributions fit? The probability integral transform
+
+If a marginal model is correct, $u_t = F(z_t)$, where $F$ is the fitted skewed Student-t distribution function, is uniformly distributed on (0, 1). The same transform produces the inputs for the copula. Table 4 tests uniformity with the Kolmogorov-Smirnov (KS) test, which is most sensitive in the centre, and the Anderson-Darling (AD) test, which gives more weight to the tails. Both tests treat the estimated GARCH parameters as known, so the p-values are approximate.
+
+```{r pittab}
+pt <- res$pit; pt[, 3:4] <- 100 * pt[, 3:4]
+colnames(pt) <- c("KS p-value", "AD p-value", "\\% below 0.05", "\\% below 0.01")
+rownames(pt) <- c("FTSE 100", "S\\&P 500")
+kab(pt, "Uniformity of the transformed residuals.", 3, escape = FALSE)
+```
+
+The FTSE 100 passes both tests. For the S&P 500 the KS test passes narrowly (p = `r f(res$pit["SNP", "KS_p"])`) while the AD test rejects (p = `r f(res$pit["SNP", "AD_p"])`). `r pc(res$pit["SNP", "share_below_5"], 1)`% of the S&P 500 values fall below 0.05 (5% expected), so the fitted distribution slightly underestimates how often large S&P 500 losses occur. Since the VaR lives in the tail, the VaR estimates below should be read as slightly optimistic.
+
+# Dependence: copula
+
+A copula describes how the two indices move together, separately from how each moves on its own. Figure 2 plots the transformed values against each other. The points concentrate along the diagonal, especially in the bottom-left corner, where both indices have very bad weeks.
+
+```{r pitplot, fig.cap = "Transformed residuals of the two indices.", fig.height = 3.6, fig.width = 3.8}
+op <- par(mar = c(4, 4, 1, 1))
+plot(res$u_ftse, res$u_snp, pch = 16, cex = 0.4, col = "blue", xlab = "FTSE 100", ylab = "S&P 500")
+par(op)
+```
+
+The copula is chosen with the `VineCopula` package, which fits every bivariate family and keeps the one with the lowest AIC. The selected copula is the **survival (180-degree rotated) BB1** copula, with $\theta = `r f(cb$par, 2)`$ and $\delta = `r f(cb$par2, 2)`$. BB1 combines a Clayton part and a Gumbel part. After the rotation, the Gumbel part describes joint crashes and the Clayton part joint booms, so the two tails can differ.
+
+The copula can be summarised in two ways. **Kendall's** $\tau = `r f(ct[4, "tau"], 2)`$ is the probability that two randomly chosen weeks are ranked the same way by both indices minus the probability that they are ranked differently. Since the two probabilities add up to 1, $\tau = 0.5$ means that for about 75% of pairs of weeks both indices agree on which week of the pair was better (for example, both did better in week A than in week B), and for about 25% they disagree. Because ordinary weeks dominate, $\tau$ mostly describes the centre. **Tail dependence** describes the extremes. $\lambda_L$ is the limit, as the threshold becomes more and more extreme, of the probability that one index has an extreme bad week given that the other has one, and $\lambda_U$ is the same for extreme good weeks. For the survival BB1,
+$$ \lambda_L = 2 - 2^{1/\delta} = `r f(ct[4, "lambda_lower"])`, \qquad \lambda_U = 2^{-1/(\theta\delta)} = `r f(ct[4, "lambda_upper"])`. $$
+
+```{r coptab}
+cc <- ct[-1, ]; cc <- cbind(cc, "AIC diff." = cc[, "AIC"] - min(cc[, "AIC"]))
+colnames(cc) <- c("Kendall $\\tau$", "$\\lambda_L$", "$\\lambda_U$", "AIC", "AIC diff.")
+rownames(cc) <- c("Gaussian", "Student-t", "Survival BB1 (selected)")
+kab(cc, "Copulas fitted to the same transformed residuals.", 3, escape = FALSE)
+```
+
+All three copulas in Table 5 agree on $\tau$ and differ only in the tails. The Gaussian copula has no tail dependence at all, and its AIC is worse by `r f(cc[1, 5], 1)`, so the data clearly require tail dependence. The choice between the Student-t and the survival BB1 copula is much less clear. The AIC difference is only `r f(cc[2, 5], 1)`, and the symmetric Student-t copula gives $\lambda_L = `r f(ct[3, "lambda_lower"], 2)`$ instead of `r f(ct[4, "lambda_lower"], 2)`. The value of $\lambda_L$ therefore depends on the copula family.
+
+Table 6 compares the copulas with the data directly, using all `r res$n_weeks` weeks. It uses the same standardised residuals the copulas are fitted to, so a week's rank reflects how bad its shock was *relative to the volatility at the time*. No copula is involved in the counts. Among the worst $q$ share of FTSE 100 weeks, it counts how many were also among the worst $q$ share of S&P 500 weeks, and compares this with each copula's prediction $C(q,q)/q$: the copula's probability that both indices are in their worst $q$ together, divided by the probability $q$ that the FTSE 100 is.
+
+```{r tailtab}
+tb <- tt[, c("q", "worst_weeks", "shared_worst", "share_worst", "model_BB1", "model_t", "model_gauss", "shared_best")]
+tb[, "q"] <- 100 * tb[, "q"]
+colnames(tb) <- c("Worst q (\\%)", "Weeks", "Shared", "Share (data)", "BB1", "Student-t", "Gaussian", "Shared best weeks")
+kab(tb, "Shared extreme weeks. Weeks: number of FTSE 100 weeks in its worst q. Shared: how many of those were also among the S\\&P 500's worst q. Share (data) = Shared / Weeks. BB1, Student-t, Gaussian: the share each fitted copula predicts, $C(q,q)/q$. Shared best weeks: the same count for the best q of weeks.", 3, escape = FALSE)
+```
+
+In the data, `r tt[3, "shared_worst"]` of the `r tt[3, "worst_weeks"]` worst 1% FTSE 100 weeks were also among the worst 1% of S&P 500 weeks. That share (`r f(tt[3, "share_worst"], 2)`) is close to the survival BB1 prediction (`r f(tt[3, "model_BB1"], 2)`) and well above the Gaussian one (`r f(tt[3, "model_gauss"], 2)`). At the 5% level the Student-t copula fits the data slightly better. These counts are small, so the safe conclusion is the one both well-fitting copulas share: **roughly half of the extreme bad weeks of one index are shared by the other, so diversification is weakest when it is most needed.** The evidence that crashes are more strongly shared than booms is weaker: `r tt[3, "shared_worst"]` shared worst weeks against `r tt[3, "shared_best"]` shared best weeks at the 1% level.
+
+# Value-at-Risk and Expected Shortfall
+
+The one-week VaR at confidence 99% is the loss exceeded with probability 1%. The ES is the average loss in the weeks worse than the VaR. Both are computed by Monte Carlo simulation. Pairs $(U, V)$ are simulated from the copula, transformed into shocks with the inverse skewed Student-t distribution, turned into weekly log returns with the GARCH model, converted to simple returns, and combined into the portfolio return $0.5(e^{r_F}-1) + 0.5(e^{r_S}-1)$.
+
+## Unconditional VaR: a typical week
+
+The original coursework simulated one path of 10,000 weeks, with each week's variance driven by the previous simulated shock. The influence of the starting point fades by a factor of $\alpha + \beta \approx 0.95$ per week, so the path describes a typical week across calm and turbulent periods. The VaR obtained from it is therefore an **unconditional** VaR. Figure 3 checks that the simulated returns reproduce the historical distributions. As a further check, `r pc(res$hist_share["p95"])`% of the real weeks had a loss larger than the unconditional 95% VaR and `r pc(res$hist_share["p99"])`% larger than the 99% VaR, close to the 5% and 1% expected.
+
+```{r dens, out.width = "88%", fig.cap = "Simulated (10,000-week path) and historical weekly log returns."}
+knitr::include_graphics(normalizePath("figures/simulated_vs_historical_density.png"), rel_path = FALSE)
+```
+
+## Conditional VaR: the week after the end of the sample
+
+The unconditional VaR ignores the current state of the market. For the first week after the sample, the variance is known from data already observed:
+$$ \sigma_{T+1}^2 = \hat\omega + \hat\alpha\, \hat u_T^2 + \hat\beta\, \hat\sigma_T^2 . $$
+The 100,000 simulated scenarios all share this volatility and differ only in their copula shocks, $r^{(i)}_{T+1} = \hat\mu + \sigma_{T+1}\varepsilon^{(i)}$. At the end of 2025 markets were calm. The forecast weekly volatilities are `r pc(sqrt(res$s2_next["FTSE"]))`% (FTSE 100) and `r pc(sqrt(res$s2_next["SNP"]))`% (S&P 500), below their long-run levels of `r pc(ft["FTSE", "long_run_vol"])`% and `r pc(ft["SNP", "long_run_vol"])`%.
+
+```{r vartab}
+v <- 100 * rm_; colnames(v) <- c("VaR 95\\%", "ES 95\\%", "VaR 99\\%", "ES 99\\%")
+rownames(v) <- c("Next week (conditional), first week of 2026", "Typical week (unconditional)", "Real weeks 2000--2025 (historical)")
+kab(v, "One-week loss of the equally weighted portfolio, \\% of its value.", 2, escape = FALSE)
+```
+
+Under the model, there is a 1% chance that the portfolio loses more than **`r pc(rm_[1, "VaR_99"])`%** in the first week of 2026, and if it does, the loss is `r pc(rm_[1, "ES_99"])`% on average. For a typical week the 99% VaR is `r pc(rm_[2, "VaR_99"])`%. The historical row is the empirical quantile of the 1,356 real weeks. Its ES is higher than the model's because it contains the extreme weeks of October 2008 and March 2020, which the model treats as rare. The Monte Carlo standard error of the conditional 99% VaR is about 0.04 percentage points.
+
+## Sensitivity to the copula and to the AR order
+
+```{r senstab}
+s <- rbind(100 * res$res_cop, 100 * res$ar_sens[-1, ])
+rownames(s) <- c("Independence", "Gaussian", "Student-t", "Survival BB1 (selected)",
+                 "Re-selected copula, AR(1)", "Re-selected copula, AR(3)", "Re-selected copula, AR(4)")
+colnames(s) <- c("VaR 95\\%", "ES 95\\%", "VaR 99\\%", "ES 99\\%")
+kab(s, "Next-week VaR and ES (\\%): same marginals with different copulas (top four rows), and the selected copula with different AR orders (bottom three rows).", 2, escape = FALSE)
+```
+
+Changing the copula moves the 99% VaR only modestly, from `r pc(res$res_cop["Gaussian", "VaR_99"])`% (Gaussian) to `r pc(res$res_cop[4, "VaR_99"])`% (survival BB1). It changes the frequency of joint crashes much more. The probability that both indices fall into their worst 1% of weeks together is `r pc(res$p_joint_1pct[1])`% under the selected copula and `r pc(res$p_joint_1pct[2])`% under the Gaussian one. Ignoring dependence altogether (independence) would understate the 99% VaR by about a third. The AR order changes the 99% VaR by at most `r f(max(abs(100 * (res$ar_sens[, "VaR_99"] - res$ar_sens[1, "VaR_99"]))), 2)` percentage points.
+
+# Backtest, 2005--2025
+
+A VaR is a forecast, so it can be checked against what actually happened. The backtest replays 2005--2025 week by week using only past data. The volatility is updated every week with the newest return, the GARCH models and the copula are fully re-estimated every 13 weeks, and the conditional and unconditional 95% and 99% VaR for the following week are forecast. A week whose real loss exceeds the VaR is a **hit**.
+
+Two tests are used. The **Kupiec** test asks whether the *number* of hits is consistent with 5% (or 1%) of weeks, using the likelihood-ratio statistic $-2\ln\big[(1-p)^{n-x}p^{x} / ((1-\hat p)^{n-x}\hat p^{x})\big] \sim \chi^2_1$, where $x$ is the number of hits in $n$ weeks and $\hat p = x/n$. The **Christoffersen** independence test asks whether hits are *spread out*. It compares the probability of a hit after a week with a hit with the probability of a hit after a week without one. For both tests a p-value above 0.05 means the VaR passes.
+
+```{r bttab}
+b <- bt[, c("hits", "expected", "kupiec_p", "hit_after_no_hit", "hit_after_hit", "christoffersen_p")]
+b[, 4:5] <- 100 * b[, 4:5]
+colnames(b) <- c("Hits", "Expected", "Kupiec p", "Hit after no hit (\\%)", "Hit after hit (\\%)", "Christoffersen p")
+rownames(b) <- gsub("%", "\\\\%", rownames(b))
+kab(b, paste0("Backtest of the one-week VaR, ", bt[1, "weeks"], " weeks."), c(0, 1, 3, 1, 1, 3), escape = FALSE)
+```
+
+```{r btfig, out.width = "100%", fig.cap = "Real weekly portfolio returns with the conditional (red) and unconditional (blue) VaR. Filled red points are hits of the conditional VaR, open blue circles hits of the unconditional VaR."}
+knitr::include_graphics(normalizePath("figures/backtest_var_2005_2025.png"), rel_path = FALSE)
+```
+
+Both VaRs pass the Kupiec test, so over 21 years both get the number of hits about right. The difference lies in *when* the hits happen. After a hit of the unconditional 95% VaR, the chance of another hit the following week is `r f(100 * bt[3, "hit_after_hit"], 1)`%, against `r f(100 * bt[3, "hit_after_no_hit"], 1)`% after a week without one, and it fails the Christoffersen test (p = `r f(bt[3, "christoffersen_p"])`). Its hits bunch in crises: `r res$hits_year$uncond95[res$hits_year$year == "2008"]` of its `r bt[3, "hits"]` hits occurred in 2008, against `r res$hits_year$cond95[res$hits_year$year == "2008"]` for the conditional VaR. The unconditional VaR (blue) barely moves, so in 2008 the returns fall through it week after week, while the conditional VaR (red) widens as soon as volatility rises.
+
+The conditional VaR does not, however, anticipate the *first* shock of a crisis. In October 2008 and March 2020 it is exceeded at the start of the crash, and only then widens. The conditional 99% VaR also has more hits than expected (`r bt[2, "hits"]` against `r f(bt[2, "expected"], 1)`). This is not statistically significant (p = `r f(bt[2, "kupiec_p"], 2)`), but it agrees with the Anderson-Darling result that the model's extreme tail is slightly too thin.
+
+**A conservative alternative.** An investor who would rather overestimate risk than underestimate it might ignore current conditions and use the unconditional VaR. The backtest shows this is not conservative: it is lower than the conditional VaR in `r round(100 * mean(res$bt$uVaR95 < res$bt$cVaR95))`% of weeks, mostly the turbulent ones. A rule that is conservative is to use the *larger* of the two VaRs each week. At 95% it is breached in `r res$max_tab[1, "hits"]` weeks (`r f(res$max_tab[1, "expected"], 0)` expected) and in only `r res$max_tab[1, "hits_2008"]` weeks of 2008, and at 99% in `r res$max_tab[2, "hits"]` weeks (`r f(res$max_tab[2, "expected"], 0)` expected). At 95% the Kupiec test, which is two-sided, rejects it (p = `r f(res$max_tab[1, "kupiec_p"])`), but in the safe direction: there are significantly *fewer* breaches than expected, so the rule overestimates risk, as intended. The cost is a higher average 95% VaR (`r pc(res$max_tab[1, "avg_VaR"])`% against `r pc(mean(res$bt$cVaR95))`%), that is, more capital set aside. Banking regulation follows the same logic, adding a VaR estimated under stressed conditions to the current one.
+
+Because the copula is re-selected using only past data, the backtest also shows how stable the copula choice is. AIC selected the symmetric Student-t copula from 2005 until `r format(starts[2], "%B %Y")`. It then selected the survival BB1 for a year, switched back to the Student-t, and selected the survival BB1 again only from `r format(starts[4], "%B %Y")`. The survival BB1 was chosen in `r sum(res$bt$copula == "Survival BB1")` of the `r nrow(res$bt)` weeks. This agrees with Table 5: tail dependence is clearly present, but the evidence for asymmetric tails is weak and depends on a few crisis periods.
+
+# Out-of-sample check, January--September 2026
+
+Finally, the model estimated on 2000--2025 was frozen. It was used to forecast the conditional VaR for each week of 2026, data it had not seen, with only the volatility updated each week. The portfolio exceeded the 95% VaR in `r res$oos_tab[1, "hits"]` of `r res$oos_tab[1, "weeks"]` weeks (about `r f(res$oos_tab[1, "expected"], 1)` expected) and the 99% VaR in `r res$oos_tab[2, "hits"]`. This is consistent with the model. With only `r res$oos_tab[1, "weeks"]` weeks, however, the test has little power: even a correct 99% VaR would have no hits in `r round(100 * 0.99^res$oos_tab[1, "weeks"])`% of such periods. The 21-year backtest remains the main evidence.
+
+```{r oos, out.width = "88%", fig.cap = "Out-of-sample check, 2026. Grey bars: real weekly portfolio returns. Red: conditional VaR forecast each week by the model frozen at the end of 2025 (solid 95\\%, dashed 99\\%). Blue: unconditional VaR (solid 95\\%, dashed 99\\%). A week is a hit if its bar falls below the line. This happened once, for the 95\\% conditional VaR at the end of February."}
+knitr::include_graphics(normalizePath("figures/out_of_sample_2026.png"), rel_path = FALSE)
+```
+
+# Conclusions and limitations
+
+* **One-week risk can be measured reliably.** A GARCH-copula model gets the number of VaR hits right over 21 years, and the version updated with current volatility also spreads them out in time. A VaR that ignores current volatility is right on average but fails repeatedly in crises.
+* **The first shock of a crash is not anticipated.** The conditional VaR reacts after the first bad week, not before it.
+* **Diversification weakens in crashes.** In the data and in both well-fitting copulas, roughly half of the extreme bad weeks of one index are shared by the other. Whether crashes are shared *more* than booms is less certain.
+* **Limitations.** The skewed Student-t tail is slightly too thin for the S&P 500, so extreme-tail estimates are mildly optimistic. Returns exclude dividends. The model makes the *size* of weekly moves cluster but draws each week's *direction* independently, so it is validated for one-week risk, not for losses that build up over several months. This matters for Stage 2.
